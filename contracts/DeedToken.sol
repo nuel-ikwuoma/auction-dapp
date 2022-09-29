@@ -62,7 +62,7 @@ contract DeedRegistry is ERC721URIStorage {
     ) internal virtual override {
         super._afterTokenTransfer(from, to, tokenId);
         if (to == address(auctionRegistry)) {
-            auctionRegistry.setIDToAuctionOwner(from);
+            auctionRegistry.setIDToAuctionOwner(from, tokenId);
         }
     }
 }
