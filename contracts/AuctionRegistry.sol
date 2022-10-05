@@ -10,10 +10,17 @@ error AuctionRegistry__NoAuction();
 error AuctionRegistry__DeadlineExpired();
 error AuctionRegistry__InvalidBidAmount();
 error AuctionRegistry__EthTransferFailed();
+error AuctionRegistry__ActiveAuctionWithBids();
+error AuctionRegistry__FinalizedOrCancelled();
+error AuctionRegistry__AlreadyFinalizedOrCancelled();
+error AuctionRegistry__DeadlineNotExpired();
 
 contract AuctionRegistry is Ownable {
     /// @notice Contract address of DeedToken contract
     address deedTokenAddress;
+
+    /// @notice Lock mechanism for re-entrancy guarded ETH transfer
+    bool lock;
 
     /// @notice Storage list of created auctions
     Auction[] auctions;
@@ -22,6 +29,10 @@ contract AuctionRegistry is Ownable {
     mapping(uint256 => uint256) auctionIdToIdx;
     mapping(address => uint256[]) auctionOwnerToAuctionIdx;
     mapping(uint256 => Bid[]) auctionIdxToBids;
+
+    //////////////////////////////
+    //         Events          //
+    /////////////////////////////
 
     /// @notice Event emitted on successful auction creation
     /// @param auctionOwner Owner of created auction
@@ -40,10 +51,16 @@ contract AuctionRegistry is Ownable {
     /// @param bidAmount Bid amount
     event BidCreated(address indexed bidder, uint256 indexed bidAmount);
 
+    /// @notice Event emitted on auction cancellation
+    event AuctionCancelled(address indexed owner, uint256 auctionIdx);
+
+    /// @notice Event emitted on successful auction finalization
+    event AuctionFinalized(address indexed owner, uint256 auctionIdx);
+
     /// @notice Possible states for contract auction
     enum AuctionState {
         ACTIVE,
-        FINALIZE,
+        FINALIZED,
         CANCELLED
     }
 
@@ -52,7 +69,7 @@ contract AuctionRegistry is Ownable {
         string name;
         string metadata;
         uint256 startPrice;
-        uint256 blockDeadline;
+        uint256 blockDeadlineToBidOnAuction;
         uint256 deedId;
         address payable owner;
         AuctionState auctionState;
@@ -66,7 +83,7 @@ contract AuctionRegistry is Ownable {
 
     constructor() {}
 
-    // called immediately after deploying deedToken to set its contract address
+    /// @notice called immediately after deployment to set deedToken contract address
     function setDeedTokenContract(address _deedToken) external onlyOwner {
         deedTokenAddress = _deedToken;
     }
@@ -83,12 +100,12 @@ contract AuctionRegistry is Ownable {
         return false;
     }
 
-    // create a new auction
+    /// @notice creates a new auction
     function createAuction(
         string memory _name,
         string memory _metadata,
         uint256 _startPrice,
-        uint256 _blockDeadline,
+        uint256 _blockDeadlineToBidOnAuction,
         uint256 _deedId
     ) external returns (bool) {
         address auctionOwner = auctionIdToOwner[_deedId];
@@ -101,7 +118,7 @@ contract AuctionRegistry is Ownable {
         newAuction.name = _name;
         newAuction.metadata = _metadata;
         newAuction.startPrice = _startPrice;
-        newAuction.blockDeadline = _blockDeadline;
+        newAuction.blockDeadlineToBidOnAuction = _blockDeadlineToBidOnAuction;
         newAuction.deedId = _deedId;
         newAuction.owner = payable(auctionOwner);
         newAuction.auctionState = AuctionState.ACTIVE;
@@ -114,41 +131,45 @@ contract AuctionRegistry is Ownable {
             auctionOwner,
             newAuctionIdx,
             _startPrice,
-            _blockDeadline
+            _blockDeadlineToBidOnAuction
         );
         return true;
     }
 
+    /// @notice Bid on an active auction
     function bidOnAuction(uint256 _auctionId) external payable {
         if (auctionIdToOwner[_auctionId] == address(0))
             revert AuctionRegistry__NoAuction();
-        uint256 auctionIdx = auctionIdToIdx[_auctionId];
 
+        uint256 auctionIdx = auctionIdToIdx[_auctionId];
         Auction memory auction = auctions[auctionIdx];
+        AuctionState auctionState = auction.auctionState;
 
         if (auction.owner == _msgSender()) revert();
-        if (block.timestamp > auction.blockDeadline)
+        if (block.timestamp > auction.blockDeadlineToBidOnAuction)
             revert AuctionRegistry__DeadlineExpired();
+        if (_isFinalizedOrCancelled(auctionState)) {
+            revert AuctionRegistry__AlreadyFinalizedOrCancelled();
+        }
 
         // check bid amount is higher than prev bid
         Bid memory lastBid;
-        uint tempAmount = auction.startPrice;
+        uint256 tempAmount = auction.startPrice;
         uint256 bidAmount = msg.value;
         uint256 bidsLength = auctionIdxToBids[auctionIdx].length;
 
         if (bidsLength > 0) {
             lastBid = auctionIdxToBids[auctionIdx][bidsLength - 1];
             tempAmount = lastBid.bidAmount;
+            // check  for correct bid amount
+            if (bidAmount < tempAmount)
+                revert AuctionRegistry__InvalidBidAmount();
+            // there's a correct bid amount
+            _reentrantSafeSendETH(lastBid.bidder, tempAmount);
         }
 
-        if (tempAmount < bidAmount) revert AuctionRegistry__InvalidBidAmount();
-
-        if (bidsLength > 0) {
-            (bool success, ) = lastBid.bidder.call{value: lastBid.bidAmount}(
-                ""
-            );
-            if (!success) revert AuctionRegistry__EthTransferFailed();
-        }
+        // If there's no previous bids, tempAmount would be the startPrice
+        if (bidAmount < tempAmount) revert AuctionRegistry__InvalidBidAmount();
 
         Bid memory newBid;
         newBid.bidder = payable(_msgSender());
@@ -157,36 +178,101 @@ contract AuctionRegistry is Ownable {
         emit BidCreated(_msgSender(), bidAmount);
     }
 
+    /// @notice Auction owner can cancelled an active unbidded auction
     function cancelAuction(uint256 _auctionId) external {
         if (auctionIdToOwner[_auctionId] != _msgSender())
             revert AuctionRegistry__NotAuctionOwner();
 
         uint256 auctionIdx = auctionIdToIdx[_auctionId];
         Auction memory auction = auctions[auctionIdx];
+        address owner = auction.owner;
 
-        if (auction.blockDeadline > block.timestamp) revert();
+        uint256 bidsLength = auctionIdxToBids[auctionIdx].length;
+        AuctionState auctionState = auction.auctionState;
 
-        uint256 bidsLength = auctionIdxToBids[_auctionId].length;
-
-        if (bidsLength > 0) {
-            Bid memory lastBid = auctionIdxToBids[_auctionId][bidsLength - 1];
-            (bool success, ) = lastBid.bidder.call{value: lastBid.bidAmount}(
-                ""
-            );
-            if (!success) revert AuctionRegistry__EthTransferFailed();
+        // disallow cancelling active auction with bids
+        if (auctionState == AuctionState.ACTIVE && bidsLength > 0) {
+            revert AuctionRegistry__ActiveAuctionWithBids();
+        }
+        if (_isFinalizedOrCancelled(auctionState)) {
+            revert AuctionRegistry__AlreadyFinalizedOrCancelled();
         }
 
         // transfer auction back to owner
-        IERC721(deedTokenAddress).transferFrom(
-            address(this),
-            auction.owner,
-            _auctionId
-        );
-
-        auctionIdToOwner[_auctionId] = address(0);
-        auctionIdToIdx[_auctionId] = 0;
+        _transferAndResetAuction(owner, _auctionId);
         auction.auctionState = AuctionState.CANCELLED;
+        emit AuctionCancelled(owner, auctionIdx);
     }
 
-    function finalizeAuction(uint256 _auctionId) external {}
+    ///  @notice finalizes an auction sending deed/ETH to respective addresses
+    function finalizeAuction(uint256 _auctionId) external {
+        // check auction exists with active state
+        address payable owner = payable(auctionIdToOwner[_auctionId]);
+        if (owner == address(0)) {
+            revert AuctionRegistry__NoAuction();
+        }
+        uint256 auctionIdx = auctionIdToIdx[_auctionId];
+        Auction memory auction = auctions[auctionIdx];
+        AuctionState auctionState = auction.auctionState;
+
+        // already finalized or cancelled
+        if (_isFinalizedOrCancelled(auctionState)) {
+            revert AuctionRegistry__AlreadyFinalizedOrCancelled();
+        }
+
+        // deadline exceeded
+        if (auction.blockDeadlineToBidOnAuction < block.timestamp) {
+            revert AuctionRegistry__DeadlineNotExpired();
+        }
+        // last bidder
+        uint256 bidsLength = auctionIdxToBids[auctionIdx].length;
+        if (bidsLength > 0) {
+            Bid memory lastBid = auctionIdxToBids[auctionIdx][bidsLength - 1];
+            _reentrantSafeSendETH(owner, lastBid.bidAmount);
+            _transferAndResetAuction(lastBid.bidder, _auctionId);
+            auction.auctionState = AuctionState.FINALIZED;
+        } else {
+            // no bid
+            _transferAndResetAuction(owner, _auctionId);
+            auction.auctionState = AuctionState.FINALIZED;
+        }
+        emit AuctionFinalized(owner, auctionIdx);
+    }
+
+    //////////////////////////////
+    //    Private Functions    //
+    /////////////////////////////
+
+    /// @notice checks if auction is finalized or cancelled already
+    function _isFinalizedOrCancelled(AuctionState _auctionState)
+        private
+        pure
+        returns (bool)
+    {
+        bool isFinalized = _auctionState == AuctionState.FINALIZED;
+        bool isCancelled = _auctionState == AuctionState.CANCELLED;
+        if (isFinalized || isCancelled) {
+            return true;
+        }
+        return false;
+    }
+
+    /// @notice Transfer deed from `contract` to address `to` and reset the states
+    function _transferAndResetAuction(address _to, uint256 _auctionId) private {
+        IERC721(deedTokenAddress).transferFrom(address(this), _to, _auctionId);
+        auctionIdToOwner[_auctionId] = address(0);
+        auctionIdToIdx[_auctionId] = 0;
+    }
+
+    /// @notice ETH transfer to address `to` with simple lock mechanism
+    function _reentrantSafeSendETH(address payable _to, uint256 _amount)
+        private
+    {
+        if (!lock) {
+            lock = true;
+            (bool success, ) = _to.call{value: _amount}("");
+            if (!success) revert AuctionRegistry__EthTransferFailed();
+        }
+        lock = true;
+    }
 }
