@@ -14,6 +14,7 @@ error AuctionRegistry__ActiveAuctionWithBids();
 error AuctionRegistry__FinalizedOrCancelled();
 error AuctionRegistry__AlreadyFinalizedOrCancelled();
 error AuctionRegistry__DeadlineNotExpired();
+error AuctionRegistry__OwnerOfAuction();
 
 contract AuctionRegistry is Ownable {
     /// @notice Contract address of DeedToken contract
@@ -88,6 +89,7 @@ contract AuctionRegistry is Ownable {
         deedTokenAddress = _deedToken;
     }
 
+    /// @notice register deed toked ID for incoming auction owner
     function setIDToAuctionOwner(address _owner, uint256 _tokenId)
         external
         returns (bool)
@@ -145,9 +147,13 @@ contract AuctionRegistry is Ownable {
         Auction memory auction = auctions[auctionIdx];
         AuctionState auctionState = auction.auctionState;
 
-        if (auction.owner == _msgSender()) revert();
+        // owner shouldnt bid on his/her auction
+        if (auction.owner == _msgSender())
+            revert AuctionRegistry__OwnerOfAuction();
+
         if (block.timestamp > auction.blockDeadlineToBidOnAuction)
             revert AuctionRegistry__DeadlineExpired();
+
         if (_isFinalizedOrCancelled(auctionState)) {
             revert AuctionRegistry__AlreadyFinalizedOrCancelled();
         }
@@ -178,7 +184,7 @@ contract AuctionRegistry is Ownable {
         emit BidCreated(_msgSender(), bidAmount);
     }
 
-    /// @notice Auction owner can cancelled an active unbidded auction
+    /// @notice Auction owner can cancelled an active and unbidded auction
     function cancelAuction(uint256 _auctionId) external {
         if (auctionIdToOwner[_auctionId] != _msgSender())
             revert AuctionRegistry__NotAuctionOwner();
@@ -237,6 +243,65 @@ contract AuctionRegistry is Ownable {
             auction.auctionState = AuctionState.FINALIZED;
         }
         emit AuctionFinalized(owner, auctionIdx);
+    }
+
+    //////////////////////////////
+    //     Getter Functions     //
+    /////////////////////////////
+
+    /// @notice get Auction at the specified index `_auctionIdx`
+    function getAuction(uint256 _auctionIdx)
+        external
+        view
+        returns (
+            string memory _name,
+            string memory _metadata,
+            uint256 _startPrice,
+            uint256 _blockDeadlineToBidOnAuction,
+            // uint256 _deedId,
+            address _owner,
+            AuctionState _auctionState
+        )
+    {
+        if (_auctionIdx >= auctions.length) {
+            revert AuctionRegistry__NoAuction();
+        }
+        Auction memory auction = auctions[_auctionIdx];
+        _name = auction.name;
+        _metadata = auction.metadata;
+        _startPrice = auction.startPrice;
+        _blockDeadlineToBidOnAuction = auction.blockDeadlineToBidOnAuction;
+        _owner = auction.owner;
+        _auctionState = auction.auctionState;
+    }
+
+    /// @notice get all auction(s) owner by the account `_auctionOwner`
+    function getAuctionsOfOwner(address _auctionOwner)
+        external
+        view
+        returns (Auction[] memory _auctions)
+    {
+        uint256[] memory _auctionIdx = auctionOwnerToAuctionIdx[_auctionOwner];
+        for (uint256 i = 0; i < _auctionIdx.length; i++) {
+            _auctions[i] = auctions[_auctionIdx[i]];
+        }
+    }
+
+    /// @notice get bids on an auction
+    function getBidsOnAuction(uint256 _auctionIdx)
+        external
+        view
+        returns (Bid[] memory _bids)
+    {
+        if (_auctionIdx >= auctions.length) {
+            revert AuctionRegistry__NoAuction();
+        }
+        _bids = auctionIdxToBids[_auctionIdx];
+    }
+
+    /// @notice get address of deed token contract
+    function getDeedContractAddress() external view returns (address) {
+        return deedTokenAddress;
     }
 
     //////////////////////////////
