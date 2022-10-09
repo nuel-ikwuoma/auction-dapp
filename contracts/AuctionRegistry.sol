@@ -300,8 +300,21 @@ contract AuctionRegistry is Ownable {
     }
 
     /// @notice get address of deed token contract
-    function getDeedContractAddress() external view returns (address) {
-        return deedTokenAddress;
+    function getDeedContractAddress()
+        external
+        view
+        returns (address _deedTokenAddress)
+    {
+        _deedTokenAddress = deedTokenAddress;
+    }
+
+    /// @notice get owner of an auction id
+    function getOwnerOfAuctionId(uint256 _auctionId)
+        external
+        view
+        returns (address _owner)
+    {
+        _owner = auctionIdToOwner[_auctionId];
     }
 
     //////////////////////////////

@@ -2,14 +2,14 @@
 pragma solidity ^0.8.9;
 
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import "./AuctionRegistry.sol";
+import "./interfaces/IAuctionRegistry.sol";
 
 /// @title A simple deed registry using ERC721 standard
 /// @author Emmanuel Ikwuoma
 /// @notice This contract allows anyone to create a deed with aim for auctioning
 contract DeedRegistry is ERC721URIStorage {
     /// @notice Instance of auction registry contract
-    AuctionRegistry immutable auctionRegistry;
+    IAuctionRegistry immutable auctionRegistry;
 
     /// @notice Event emitted on successful deed creation
     /// @param deedOwner The deed's owner address
@@ -25,7 +25,7 @@ contract DeedRegistry is ERC721URIStorage {
         string memory _symbol,
         address _auctionRegistry
     ) ERC721(_name, _symbol) {
-        auctionRegistry = AuctionRegistry(_auctionRegistry);
+        auctionRegistry = IAuctionRegistry(_auctionRegistry);
     }
 
     /// @notice Mints a unique deed to calling address
@@ -55,14 +55,19 @@ contract DeedRegistry is ERC721URIStorage {
     }
 
     /// @notice Hook to register deed after token transfer to Auction contract
-    function _afterTokenTransfer(
+    function _beforeTokenTransfer(
         address from,
         address to,
         uint256 tokenId
     ) internal virtual override {
-        super._afterTokenTransfer(from, to, tokenId);
+        super._beforeTokenTransfer(from, to, tokenId);
         if (to == address(auctionRegistry)) {
-            auctionRegistry.setIDToAuctionOwner(from, tokenId);
+            auctionRegistry.setIDToAuctionOwner(ownerOf(tokenId), tokenId);
         }
+    }
+
+    /// @notice gets address of auction registry
+    function getAuctionRegistry() external view returns (address) {
+        return address(auctionRegistry);
     }
 }
