@@ -4,7 +4,7 @@ const { ethers } = require('hardhat')
 
 const hre = require('hardhat')
 
-describe('', function () {
+describe('Deed Registry', function () {
   // fixture to setup deployments for both `AuctionRegistry` and `DeedRegistry`
   async function deployAuctionRegistryAndDeedToken() {
     const AuctionRegistry = await ethers.getContractFactory('AuctionRegistry')

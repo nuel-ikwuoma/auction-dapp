@@ -226,8 +226,8 @@ contract AuctionRegistry is Ownable {
             revert AuctionRegistry__AlreadyFinalizedOrCancelled();
         }
 
-        // deadline exceeded
-        if (auction.blockDeadlineToBidOnAuction < block.timestamp) {
+        // deadline not exceeded
+        if (auction.blockDeadlineToBidOnAuction > block.timestamp) {
             revert AuctionRegistry__DeadlineNotExpired();
         }
         // last bidder

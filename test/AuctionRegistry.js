@@ -5,7 +5,7 @@ const {
 const { expect } = require('chai')
 const { ethers } = require('hardhat')
 
-describe('', function () {
+describe('Auction Registry', function () {
   async function deployAuctionRegistryAndDeedToken() {
     const AuctionRegistry = await ethers.getContractFactory('AuctionRegistry')
     const DeedRegistry = await ethers.getContractFactory('DeedRegistry')
@@ -41,11 +41,16 @@ describe('', function () {
     expect(auctionIdOwner).to.equal(deployer.address)
   })
 
-  it('should be able to create a new auction if registered with auction registry', async function () {
+  it('should be able to create, bid and finalize a registered auction', async function () {
     const { auctionRegistry, deedRegistry } = await loadFixture(
       deployAuctionRegistryAndDeedToken,
     )
-    const [deployer] = await ethers.getSigners()
+    const [
+      deployer,
+      bidderOne,
+      bidderTwo,
+      bidderThree,
+    ] = await ethers.getSigners()
 
     const deedId = 0
     const deedURI = ''
@@ -62,6 +67,8 @@ describe('', function () {
     const name = 'Test Auction'
     const metadata = ''
     const startPrice = ethers.utils.parseEther('1')
+    const bidAmount = ethers.utils.parseEther('1.2')
+
     const deadline = (await time.latest()) + ONE_DAY_IN_SECS
 
     await auctionRegistry.createAuction(
@@ -81,5 +88,48 @@ describe('', function () {
       String(deadline),
     )
     expect(res._owner).to.equal(deployer.address)
+
+    // `bidderOne` should be able to bid on auction
+    await auctionRegistry
+      .connect(bidderOne)
+      .bidOnAuction(deedId, { value: bidAmount })
+    const bids = await auctionRegistry.getBidsOnAuction(deedId)
+    expect(bids.length).to.equal(1)
+
+    // expect bid of a lesser amount to fail
+    await expect(
+      auctionRegistry
+        .connect(bidderTwo)
+        .bidOnAuction(deedId, { value: startPrice }),
+    ).to.be.revertedWithCustomError(
+      auctionRegistry,
+      'AuctionRegistry__InvalidBidAmount',
+    )
+    // owner should not be able to bid on auction
+    await expect(
+      auctionRegistry.bidOnAuction(deedId),
+    ).to.be.revertedWithCustomError(
+      auctionRegistry,
+      'AuctionRegistry__OwnerOfAuction',
+    )
+    // expect a bid past auction deadline to fail
+    await time.increaseTo(deadline + 1)
+    await expect(
+      auctionRegistry.connect(bidderThree).bidOnAuction(deedId, {
+        value: ethers.utils.parseEther('2'),
+      }),
+    ).to.be.revertedWithCustomError(
+      auctionRegistry,
+      'AuctionRegistry__DeadlineExpired',
+    )
+    // expect `anyone` to be able to finalize auction past deadline
+    // and ether balance of `owner` should change by `lastBidAmount`
+    await expect(
+      auctionRegistry.connect(bidderThree).finalizeAuction(deedId),
+    ).changeEtherBalance(deployer, bidAmount)
+
+    // send auction to `last bidder`
+    const newDeedOwner = await deedRegistry.ownerOf(deedId)
+    await expect(newDeedOwner).to.equal(bidderOne.address)
   })
 })
